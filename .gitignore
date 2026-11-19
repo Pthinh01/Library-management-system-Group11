@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+test-results/
+*.lmb
+.env
+*.log
