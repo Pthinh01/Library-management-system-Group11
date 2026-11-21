@@ -1,74 +1,44 @@
 # Library Management System — Group 11
 
-Chương trình quản lý thư viện bằng Python, SQLite và giao diện web theo thiết kế Figma.
-
-## Các tệp chính
-
-| Tệp | Nội dung |
-|---|---|
-| `app.py` | Chạy chương trình, nhận yêu cầu từ giao diện |
-| `Source_code.py` | Các lớp đối tượng, chức năng mượn/trả, đặt trước, gia hạn và thu phạt |
-| `database.py` | Tạo bảng và xử lý dữ liệu SQLite |
-| `Testing Document.xlsx` | 158 test case theo mẫu của môn học |
-| `run_tests.py` | Chạy bộ kiểm thử tự động |
-| `requirements.txt` | Thư viện cần cài |
-| `Dockerfile` | Đóng gói và chạy bằng Docker |
-| `static/` | Giao diện, hình ảnh và font chữ |
-| `tests/` | Mã kiểm thử |
+Bản hiện tại chạy bằng một tệp Source_code.py, dùng SQLite và giao diện web theo thiết kế Figma. Không cần MySQL.
 
 ## Chạy chương trình
 
-Mở Terminal tại thư mục chứa `app.py`, chạy:
+    python Source_code.py
 
-```bash
-python -m pip install -r requirements.txt
-python app.py
-```
+Mở [http://127.0.0.1:8765](http://127.0.0.1:8765). Giữ Terminal đang chạy; nhấn Ctrl+C để dừng.
 
-Mở **http://127.0.0.1:8765**. Giữ Terminal đang chạy khi sử dụng.
+Nếu sử dụng chức năng sao lưu mã hóa, cài thêm:
 
-## Đăng nhập minh họa
+    python -m pip install cryptography
 
-| Vai trò | Tên đăng nhập | Mật khẩu |
-|---|---|---|
-| Thủ thư | thinh.nguyen | LibraryDemo!2026 |
-| Độc giả | phucthinh | LibraryDemo!2026 |
-| Quản trị viên | admin | LibraryDemo!2026 |
+Tài khoản minh họa: thinh.nguyen, phucthinh hoặc admin; mật khẩu LibraryDemo!2026.
 
-## Chạy trên GitHub Codespaces
+## Dữ liệu
 
-Chọn **Code → Codespaces**, mở Terminal rồi chạy:
+Chương trình tự tạo library.sqlite3 cạnh mã nguồn. Giữ tệp này để dùng lại dữ liệu sau khi tắt hoặc chuyển máy. Tệp dữ liệu đang sử dụng không được đưa lên kho mã nguồn. Giao diện, ảnh và font đã nhúng trong Source_code.py.
 
-```bash
-python -m pip install -r requirements.txt
-python app.py --host 0.0.0.0 --port 8765
-```
+## Codespaces
 
-Vào **Ports → 8765 → Open in Browser**. Nếu dùng cổng khác, thay `8765` trong lệnh và mở đúng cổng đó.
+Chọn Code → Codespaces, mở Terminal và chạy:
 
-## Chạy bằng Docker
+    python Source_code.py --host 0.0.0.0 --port 8765
 
-```bash
-docker build -t library-group11 .
-docker run -d --name library-group11 -p 127.0.0.1:8766:8765 -v library_group11_data:/app/data library-group11
-```
+Mở cổng 8765 trong mục Ports. Có thể thay số cổng nếu cổng cũ đang được dùng.
 
-Mở **http://127.0.0.1:8766**. Dừng bằng `docker stop library-group11`; chạy lại bằng `docker start library-group11`.
+## Docker
 
-## Kiểm thử
+    docker build -t library-group11 .
+    docker run -d --name library-group11 -p 127.0.0.1:8766:8765 library-group11
 
-```bash
-python run_tests.py
-```
+Mở [http://127.0.0.1:8766](http://127.0.0.1:8766). Tạm dừng bằng docker stop library-group11, chạy lại bằng docker start library-group11. Khi chạy Docker, SQLite nằm trong container.
 
-Kết quả ghi trong `test-results/results.json`. Test dùng DB tạm riêng. Tài liệu kiểm thử giữ nguyên 5 cột của mẫu được cấp; test chưa chạy đầy đủ không được xem là đã đạt.
+## Các tệp bài nộp
 
-## Dữ liệu và sao lưu
+- Source_code.py: toàn bộ mã Python, cơ sở dữ liệu và giao diện.
+- Testing Document.xlsx: tài liệu kiểm thử rút gọn, 40 test case theo 5 cột mẫu.
+- Dockerfile: cấu hình đóng gói.
+- task assignment.docx: phân công công việc của nhóm.
+- containing evidence of tool usage.docx: tài liệu minh chứng công cụ.
 
-Dữ liệu lưu tại `data/library.sqlite3` và được giữ sau khi tắt ứng dụng. Dữ liệu minh họa chỉ tạo khi DB chưa có tài khoản. Khôi phục một bản sao lưu đã tải từ giao diện quản trị:
-
-```bash
-python app.py --restore library-backup.lmb --destination data/restored.sqlite3
-```
-
-Chương trình hỏi mật khẩu bản sao lưu và chỉ cho khôi phục sang DB mới.
+Các tệp hỗ trợ từ phiên bản trước vẫn còn trong lịch sử và kho; điểm khởi chạy của bản hiện tại là Source_code.py.

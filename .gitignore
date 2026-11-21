@@ -6,3 +6,6 @@ test-results/
 *.lmb
 .env
 *.log
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
