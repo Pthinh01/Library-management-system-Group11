@@ -1,6 +1,6 @@
 # Library Management System — Group 11
 
-Bản hiện tại chạy bằng một tệp Source_code.py, dùng SQLite và giao diện web theo thiết kế Figma. Không cần MySQL.
+Bản hiện tại chạy bằng một tệp Source_code.py, dùng SQLite và giao diện web theo thiết kế Figma.
 
 ## Chạy chương trình
 
@@ -17,14 +17,6 @@ Tài khoản minh họa: thinh.nguyen, phucthinh hoặc admin; mật khẩu Libr
 ## Dữ liệu
 
 Chương trình tự tạo library.sqlite3 cạnh mã nguồn. Giữ tệp này để dùng lại dữ liệu sau khi tắt hoặc chuyển máy. Tệp dữ liệu đang sử dụng không được đưa lên kho mã nguồn. Giao diện, ảnh và font đã nhúng trong Source_code.py.
-
-## Codespaces
-
-Chọn Code → Codespaces, mở Terminal và chạy:
-
-    python Source_code.py --host 0.0.0.0 --port 8765
-
-Mở cổng 8765 trong mục Ports. Có thể thay số cổng nếu cổng cũ đang được dùng.
 
 ## Docker
 
