@@ -27,14 +27,6 @@ The Python `unittest` suite contains 128 tests: 122 functional, domain and HTTP 
 
 The Excel document contains 40 concise test cases in English, including manual interface and deployment checks. These are separate from the 128 automated tests. Performance, availability and usability targets require testing in the intended deployment environment.
 
-## Codespaces
-
-```sh
-python Source_code.py --host 0.0.0.0 --port 8765
-```
-
-Open port 8765 from the Ports panel. Change the port number if necessary.
-
 ## Docker
 
 ```sh
