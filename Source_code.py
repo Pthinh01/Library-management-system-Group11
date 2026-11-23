@@ -10,7 +10,7 @@ Dữ liệu lưu tại library.sqlite3 cạnh mã nguồn. Không cần MySQL ho
 import sqlite3
 from contextlib import contextmanager, closing
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import hmac
 import json
@@ -220,6 +220,30 @@ class Database:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as c:
             c.executescript(SCHEMA)
+            additions = {
+                'accounts': {'updated_at': "TEXT NOT NULL DEFAULT ''"},
+                'members': {'registration_date': "TEXT NOT NULL DEFAULT ''"},
+                'staff': {'hire_date': "TEXT NOT NULL DEFAULT ''"},
+                'categories': {'description': "TEXT NOT NULL DEFAULT ''"},
+                'publishers': {'phone': "TEXT NOT NULL DEFAULT ''"},
+                'system_settings': {'description': "TEXT NOT NULL DEFAULT ''"},
+                'fines': {'reason': "TEXT NOT NULL DEFAULT 'OVERDUE'"},
+            }
+            for table, columns in additions.items():
+                existing = {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}
+                for column, definition in columns.items():
+                    if column not in existing:
+                        c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+            c.execute("UPDATE accounts SET updated_at=created_at WHERE updated_at=''")
+            c.execute("UPDATE members SET registration_date=(SELECT created_at FROM accounts WHERE accounts.id=members.account_id) WHERE registration_date=''")
+            c.executescript("""
+                CREATE TRIGGER IF NOT EXISTS account_created AFTER INSERT ON accounts
+                BEGIN UPDATE accounts SET updated_at=NEW.created_at WHERE id=NEW.id; END;
+                CREATE TRIGGER IF NOT EXISTS member_registered AFTER INSERT ON members
+                BEGIN UPDATE members SET registration_date=(SELECT created_at FROM accounts WHERE id=NEW.account_id) WHERE id=NEW.id AND registration_date=''; END;
+                CREATE TRIGGER IF NOT EXISTS account_changed AFTER UPDATE OF username,email,password_hash,role,status ON accounts
+                BEGIN UPDATE accounts SET updated_at=strftime('%Y-%m-%dT%H:%M:%S+00:00','now') WHERE id=NEW.id; END;
+            """)
             c.execute('PRAGMA journal_mode=WAL')
 
     def connect(self):
@@ -246,25 +270,55 @@ class Database:
 # 3. CÁC LỚP ĐỐI TƯỢNG VÀ XỬ LÝ NGHIỆP VỤ
 # ==========================================================================
 
-'Small domain objects used by the service layer (no HTTP or SQL here).'
+# Các lớp theo class diagram. Tên Python dùng snake_case;
+# các tên camelCase trên sơ đồ cũng được cung cấp ở cuối phần này.
+# Đối tượng gắn với LibraryService gọi chung nghiệp vụ có kiểm tra quyền.
+class ServiceObject:
+    def bind(self, service, token):
+        self._service, self._token = service, token
+        return self
 
-@dataclass(frozen=True)
-class LoanDetail:
+    def context(self):
+        if not getattr(self, '_service', None) or not getattr(self, '_token', None):
+            raise ValueError('Cần gắn đối tượng với dịch vụ và phiên đăng nhập.')
+        return self._service, self._token
+
+
+@dataclass
+class LoanDetail(ServiceObject):
     due_date: datetime
     return_date: datetime | None = None
+    id: int = 0
+    renewal_count: int = 0
+    status: str = 'OPEN'
+    copy: 'BookCopy | None' = field(default=None, repr=False)
+    fine: 'Fine | None' = field(default=None, repr=False)
 
-    def overdue_days(self, now: datetime) -> int:
+    def renew(self) -> bool:
+        service, token = self.context()
+        result = service.renew(token, self.id, secrets.token_urlsafe(24))
+        self.due_date = datetime.fromisoformat(result['due_date'])
+        self.renewal_count = result['renewal_count']
+        return True
+
+    def overdue_days(self, now: datetime | None = None) -> int:
         """A started late day counts as one day, consistent with checkout policy."""
+        now = now or datetime.now(timezone.utc)
         seconds = ((self.return_date or now) - self.due_date).total_seconds()
         return max(0, (int(seconds) + 86399) // 86400)
 
-    def is_overdue(self, now: datetime) -> bool:
-        return self.return_date is None and now > self.due_date
+    def is_overdue(self, now: datetime | None = None) -> bool:
+        return self.status == 'OPEN' and self.return_date is None and (now or datetime.now(timezone.utc)) > self.due_date
 
 @dataclass(frozen=True)
 class Fine:
     amount: int
     paid: int = 0
+    id: int = 0
+    reason: str = 'OVERDUE'
+    status: str = 'UNPAID'
+    issued_at: str = ''
+    payments: list['FinePayment'] = field(default_factory=list, compare=False)
 
     @property
     def balance(self) -> int:
@@ -273,12 +327,15 @@ class Fine:
     def pay(self, amount: int):
         if type(amount) is not int or not 0 < amount <= self.balance:
             raise ValueError('Số tiền phải là số nguyên dương và không vượt dư nợ.')
-        return Fine(self.amount, self.paid + amount)
+        return replace(self, paid=self.paid + amount, status='PAID' if amount == self.balance else 'PARTIAL')
 
 @dataclass(frozen=True)
 class BookCopy:
     barcode: str
     status: str
+    id: int = 0
+    shelf_location: str = ''
+    book_id: int = 0
 
     def can_issue(self) -> bool:
         return self.status in ('AVAILABLE', 'HELD')
@@ -286,18 +343,43 @@ class BookCopy:
     def mark_borrowed(self):
         if not self.can_issue():
             raise ValueError('Bản sao không sẵn sàng.')
-        return BookCopy(self.barcode, 'ON_LOAN')
+        return replace(self, status='ON_LOAN')
 
     def mark_available(self):
-        return BookCopy(self.barcode, 'AVAILABLE')
+        return replace(self, status='AVAILABLE')
 
 @dataclass
-class Account:
+class Account(ServiceObject):
     id: int = 0
     username: str = ''
     email: str = ''
     role: str = 'MEMBER'
     status: str = 'ACTIVE'
+
+    password_hash: str = field(default='', repr=False)
+    created_at: str = ''
+    updated_at: str = ''
+
+    def login(self, password: str, service=None) -> bool:
+        service = service or getattr(self, '_service', None)
+        if service is None:
+            raise ValueError('Cần LibraryService để đăng nhập.')
+        result = service.login(self.username or self.email, password)
+        refreshed = service.load_account(result['token'])
+        for name in ('id', 'username', 'email', 'role', 'status', 'password_hash', 'created_at', 'updated_at'):
+            setattr(self, name, getattr(refreshed, name))
+        self.bind(service, result['token'])
+        return True
+
+    def logout(self):
+        service, token = self.context()
+        service.logout(token)
+        self._token = None
+
+    def change_password(self, old: str, new: str):
+        service, token = self.context()
+        service.change_password(token, old, new)
+        self._token = None
 
     def can_login(self) -> bool:
         return self.status == 'ACTIVE'
@@ -309,10 +391,18 @@ class Member(Account):
     phone: str = ''
     address: str = ''
     member_status: str = 'ACTIVE'
+    member_id: int = 0
+    registration_date: str = ''
+    loans: list['Loan'] = field(default_factory=list, repr=False)
+    reservations: list['Reservation'] = field(default_factory=list, repr=False)
     open_count: int = 0
     limit: int = 5
     overdue_count: int = 0
     balance: int = 0
+
+    def view_history(self) -> list:
+        service, token = self.context()
+        return service.history(token, self.member_id)
 
     def borrowing_reasons(self, count: int, allowed_debt: int=0) -> list[str]:
         reasons = []
@@ -327,6 +417,8 @@ class Member(Account):
         return reasons
 
     def can_borrow(self, count: int=1, allowed_debt: int=0) -> bool:
+        if getattr(self, '_service', None) and getattr(self, '_token', None):
+            return self._service.borrowing_decision(self._token, self.member_id, count)['eligible']
         return not self.borrowing_reasons(count, allowed_debt)
 
 @dataclass
@@ -335,6 +427,24 @@ class Staff(Account):
     full_name: str = ''
     phone: str = ''
     hire_date: str = ''
+    staff_id: int = 0
+    loans: list['Loan'] = field(default_factory=list, repr=False)
+    settings: list['SystemSetting'] = field(default_factory=list, repr=False)
+
+    def issue_loan(self, member_id: int, barcodes: list[str]) -> 'Loan':
+        service, token = self.context()
+        result = service.checkout(token, member_id, barcodes, secrets.token_urlsafe(24))
+        loan = service.load_loan(token, result['loan_id'])
+        self.loans.append(loan)
+        return loan
+
+    def process_return(self, barcode: str, condition: str = 'AVAILABLE'):
+        service, token = self.context()
+        return service.return_copy(token, barcode, condition, secrets.token_urlsafe(24))
+
+    def collect_fine(self, fine_id: int, amount: int, method: str = 'CASH'):
+        service, token = self.context()
+        return service.pay(token, fine_id, amount, method, secrets.token_urlsafe(24))
 
 @dataclass
 class Author:
@@ -362,8 +472,14 @@ class Book:
     description: str = ''
     status: str = 'ACTIVE'
 
-    def count_available(self, copies: list[BookCopy]) -> int:
-        return sum((copy.status == 'AVAILABLE' for copy in copies))
+    authors: list[Author] = field(default_factory=list)
+    publisher: Publisher | None = None
+    category: Category | None = None
+    copies: list[BookCopy] = field(default_factory=list)
+    reservations: list['Reservation'] = field(default_factory=list, repr=False)
+
+    def count_available(self, copies: list[BookCopy] | None = None) -> int:
+        return sum(copy.status == 'AVAILABLE' for copy in (self.copies if copies is None else copies))
 
 @dataclass
 class Loan:
@@ -374,13 +490,17 @@ class Loan:
     status: str = 'OPEN'
     copies: list[BookCopy] = field(default_factory=list)
 
+    member: Member | None = field(default=None, repr=False)
+    staff: Staff | None = field(default=None, repr=False)
+    details: list[LoanDetail] = field(default_factory=list)
+
     def add_item(self, copy: BookCopy):
         if any((item.barcode == copy.barcode for item in self.copies)):
             raise ValueError('Bản sao đã có trong phiếu.')
         self.copies.append(copy)
 
 @dataclass
-class Reservation:
+class Reservation(ServiceObject):
     id: int = 0
     member_id: int = 0
     book_id: int = 0
@@ -389,12 +509,20 @@ class Reservation:
     queue_position: int = 0
     status: str = 'WAITING'
 
+    member: Member | None = field(default=None, repr=False)
+    book: Book | None = field(default=None, repr=False)
+
     def cancel(self):
+        if getattr(self, '_service', None):
+            service, token = self.context()
+            service.cancel_reservation(token, self.id)
         if self.status not in ('WAITING', 'READY'):
             raise ValueError('Yêu cầu không còn hoạt động.')
         self.status = 'CANCELLED'
 
     def fulfill(self):
+        if getattr(self, '_service', None):
+            raise ValueError('Đặt trước được hoàn tất khi thủ thư xác nhận cho mượn.')
         if self.status != 'READY':
             raise ValueError('Chưa có bản sao được giữ cho yêu cầu này.')
         self.status = 'FULFILLED'
@@ -412,6 +540,8 @@ class SystemSetting:
     key: str = ''
     value: str = ''
     description: str = ''
+    updated_at: str = ''
+    updated_by: Staff | None = field(default=None, repr=False)
 
     def get(self, key: str) -> str:
         if key != self.key:
@@ -423,6 +553,65 @@ class SystemSetting:
 DEFAULT_POLICY = dict(max_active_copies=5, loan_days=14, renewal_days=7, max_renewals=1, daily_fine_rate=1000, fine_block_threshold=0, band1_days=7, band2_days=30, multiplier2=2, multiplier3=3, pickup_hours=48)
 
 STAFF = ('LIBRARIAN', 'ADMINISTRATOR')
+
+
+# Tên tương đương trong class diagram (camelCase).
+Author.authorId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+Author.authorName = property(lambda self: self.name, lambda self, value: setattr(self, 'name', value))
+Publisher.publisherId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+Publisher.publisherName = property(lambda self: self.name, lambda self, value: setattr(self, 'name', value))
+Category.categoryId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+Category.categoryName = property(lambda self: self.name, lambda self, value: setattr(self, 'name', value))
+Book.bookId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+Book.publicationYear = property(lambda self: self.publication_year, lambda self, value: setattr(self, 'publication_year', value))
+Book.bookStatus = property(lambda self: self.status, lambda self, value: setattr(self, 'status', value))
+BookCopy.copyId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+BookCopy.copyStatus = property(lambda self: self.status, lambda self, value: setattr(self, 'status', value))
+BookCopy.shelfLocation = property(lambda self: self.shelf_location, lambda self, value: setattr(self, 'shelf_location', value))
+Account.accountId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+Account.passwordHash = property(lambda self: self.password_hash, lambda self, value: setattr(self, 'password_hash', value))
+Account.createdAt = property(lambda self: self.created_at, lambda self, value: setattr(self, 'created_at', value))
+Account.updatedAt = property(lambda self: self.updated_at, lambda self, value: setattr(self, 'updated_at', value))
+Member.memberId = property(lambda self: self.member_id, lambda self, value: setattr(self, 'member_id', value))
+Member.fullName = property(lambda self: self.full_name, lambda self, value: setattr(self, 'full_name', value))
+Member.registrationDate = property(lambda self: self.registration_date, lambda self, value: setattr(self, 'registration_date', value))
+Member.memberStatus = property(lambda self: self.member_status, lambda self, value: setattr(self, 'member_status', value))
+Staff.staffId = property(lambda self: self.staff_id, lambda self, value: setattr(self, 'staff_id', value))
+Staff.fullName = property(lambda self: self.full_name, lambda self, value: setattr(self, 'full_name', value))
+Staff.hireDate = property(lambda self: self.hire_date, lambda self, value: setattr(self, 'hire_date', value))
+Loan.loanId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+Loan.loanDate = property(lambda self: self.loan_date, lambda self, value: setattr(self, 'loan_date', value))
+Loan.loanStatus = property(lambda self: self.status, lambda self, value: setattr(self, 'status', value))
+LoanDetail.loanDetailId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+LoanDetail.dueDate = property(lambda self: self.due_date, lambda self, value: setattr(self, 'due_date', value))
+LoanDetail.returnDate = property(lambda self: self.return_date, lambda self, value: setattr(self, 'return_date', value))
+LoanDetail.renewalCount = property(lambda self: self.renewal_count, lambda self, value: setattr(self, 'renewal_count', value))
+LoanDetail.detailStatus = property(lambda self: self.status, lambda self, value: setattr(self, 'status', value))
+Reservation.reservationId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+Reservation.reservationDate = property(lambda self: self.reservation_date, lambda self, value: setattr(self, 'reservation_date', value))
+Reservation.expiryDate = property(lambda self: self.expiry_date, lambda self, value: setattr(self, 'expiry_date', value))
+Reservation.queuePosition = property(lambda self: self.queue_position, lambda self, value: setattr(self, 'queue_position', value))
+Fine.fineId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+Fine.fineStatus = property(lambda self: self.status, lambda self, value: setattr(self, 'status', value))
+Fine.issuedAt = property(lambda self: self.issued_at, lambda self, value: setattr(self, 'issued_at', value))
+FinePayment.paymentId = property(lambda self: self.id, lambda self, value: setattr(self, 'id', value))
+FinePayment.paymentDate = property(lambda self: self.payment_date, lambda self, value: setattr(self, 'payment_date', value))
+FinePayment.paymentMethod = property(lambda self: self.payment_method, lambda self, value: setattr(self, 'payment_method', value))
+SystemSetting.settingKey = property(lambda self: self.key, lambda self, value: setattr(self, 'key', value))
+SystemSetting.settingValue = property(lambda self: self.value, lambda self, value: setattr(self, 'value', value))
+SystemSetting.updatedAt = property(lambda self: self.updated_at, lambda self, value: setattr(self, 'updated_at', value))
+Book.countAvailable = Book.count_available
+BookCopy.markBorrowed = BookCopy.mark_borrowed
+BookCopy.markAvailable = BookCopy.mark_available
+Account.changePassword = Account.change_password
+Member.canBorrow = Member.can_borrow
+Member.viewHistory = Member.view_history
+Staff.issueLoan = Staff.issue_loan
+Staff.processReturn = Staff.process_return
+Staff.collectFine = Staff.collect_fine
+Loan.addItem = Loan.add_item
+LoanDetail.isOverdue = LoanDetail.is_overdue
+LoanDetail.overdueDays = LoanDetail.overdue_days
 
 class RuleError(Exception):
 
@@ -474,6 +663,76 @@ class LibraryService:
         with self.db.transaction() as c:
             for key, value in DEFAULT_POLICY.items():
                 c.execute('INSERT OR IGNORE INTO system_settings(key,value,updated_at) VALUES(?,?,?)', (key, str(value), self.now()))
+
+    def borrowing_decision(self, token, member_id, count=1):
+        integer(count, 'Số lượng', 0, 100)
+        with self.db.transaction() as c:
+            actor = self._actor(c, token)
+            self._own_member(c, actor, member_id)
+            return self._eligibility(c, member_id, count)
+
+    def load_account(self, token, account_id=None):
+        """Nạp lớp Member/Staff đúng hồ sơ; không cho độc giả đọc người khác."""
+        with self.db.transaction() as c:
+            actor = self._actor(c, token)
+            account_id = actor['id'] if account_id is None else account_id
+            require(account_id == actor['id'] or actor['role'] == 'ADMINISTRATOR', 'FORBIDDEN', 'Không được đọc tài khoản khác.', 403)
+            row = c.execute('SELECT * FROM accounts WHERE id=?', (account_id,)).fetchone()
+            require(row is not None, 'NOT_FOUND', 'Không tìm thấy tài khoản.', 404)
+            common = {name: row[name] for name in ('id','username','email','role','status','password_hash','created_at','updated_at')}
+            if row['role'] == 'MEMBER':
+                profile = c.execute('SELECT * FROM members WHERE account_id=?', (account_id,)).fetchone()
+                obj = Member(**common, account_id=account_id, member_id=profile['id'], full_name=profile['full_name'], phone=profile['phone'], address=profile['address'], member_status=profile['status'], registration_date=profile['registration_date'])
+                info = self._eligibility(c, profile['id'], 0)
+                obj.open_count = info['open_count']
+                obj.limit = info['limit']
+                obj.balance = info['balance']
+                obj.overdue_count = len(info['overdue_details'])
+            else:
+                profile = c.execute('SELECT * FROM staff WHERE account_id=?', (account_id,)).fetchone()
+                obj = Staff(**common, account_id=account_id, staff_id=profile['id'], full_name=profile['full_name'], phone=profile['phone'], hire_date=profile['hire_date'])
+            # Chỉ gắn phiên nếu đang nạp chính tài khoản đăng nhập.
+            return obj.bind(self, token) if account_id == actor['id'] else obj
+
+    def load_book(self, book_id):
+        with self.db.transaction(write=False) as c:
+            row = c.execute('SELECT * FROM books WHERE id=?', (book_id,)).fetchone()
+            require(row is not None, 'NOT_FOUND', 'Không tìm thấy sách.', 404)
+            obj = Book(id=row['id'], isbn=row['isbn'], title=row['title'], publication_year=row['publication_year'], description=row['description'], status=row['status'])
+            obj.authors = [Author(r['id'], r['name']) for r in c.execute('SELECT a.* FROM authors a JOIN book_authors ba ON ba.author_id=a.id WHERE ba.book_id=?', (book_id,))]
+            category = c.execute('SELECT * FROM categories WHERE id=?', (row['category_id'],)).fetchone()
+            obj.category = Category(category['id'], category['name'], category['description'])
+            publisher = c.execute('SELECT * FROM publishers WHERE id=?', (row['publisher_id'],)).fetchone()
+            if publisher:
+                obj.publisher = Publisher(publisher['id'], publisher['name'], publisher['phone'])
+            obj.copies = [BookCopy(r['barcode'], r['status'], r['id'], r['location'], book_id) for r in c.execute('SELECT * FROM book_copies WHERE book_id=?', (book_id,))]
+            return obj
+
+    def load_loan(self, token, loan_id):
+        with self.db.transaction() as c:
+            actor = self._actor(c, token)
+            row = c.execute('SELECT * FROM loans WHERE id=?', (loan_id,)).fetchone()
+            require(row is not None, 'NOT_FOUND', 'Không tìm thấy phiếu.', 404)
+            if actor['role'] == 'MEMBER':
+                self._own_member(c, actor, row['member_id'])
+            obj = Loan(id=row['id'], member_id=row['member_id'], staff_id=row['staff_id'], loan_date=row['loan_date'], status=row['status'])
+            member = c.execute('SELECT * FROM members WHERE id=?', (row['member_id'],)).fetchone()
+            staff = c.execute('SELECT * FROM staff WHERE id=?', (row['staff_id'],)).fetchone()
+            obj.member = Member(id=member['account_id'], account_id=member['account_id'], member_id=member['id'], full_name=member['full_name'], phone=member['phone'], address=member['address'], member_status=member['status'], registration_date=member['registration_date'])
+            obj.staff = Staff(id=staff['account_id'], account_id=staff['account_id'], staff_id=staff['id'], full_name=staff['full_name'], phone=staff['phone'], hire_date=staff['hire_date'])
+            for r in c.execute('SELECT d.*,bc.barcode,bc.location,bc.book_id,bc.status copy_status FROM loan_details d JOIN book_copies bc ON bc.id=d.copy_id WHERE loan_id=?', (loan_id,)):
+                copy = BookCopy(r['barcode'], r['copy_status'], r['copy_id'], r['location'], r['book_id'])
+                detail = LoanDetail(datetime.fromisoformat(r['due_date']), datetime.fromisoformat(r['return_date']) if r['return_date'] else None, r['id'], r['renewal_count'], r['status'], copy).bind(self, token)
+                fine = c.execute('SELECT * FROM fines WHERE detail_id=?', (r['id'],)).fetchone()
+                if fine:
+                    payments = [FinePayment(p['id'], p['fine_id'], p['amount'], p['paid_at'], p['method']) for p in c.execute('SELECT * FROM fine_payments WHERE fine_id=?', (fine['id'],))]
+                    paid = sum(p.amount for p in payments)
+                    detail.fine = Fine(fine['amount'], paid, fine['id'], fine['reason'], 'PAID' if paid == fine['amount'] else 'PARTIAL' if paid else 'UNPAID', fine['issued_at'], payments)
+                obj.copies.append(copy)
+                obj.details.append(detail)
+            obj.member.loans.append(obj)
+            obj.staff.loans.append(obj)
+            return obj
 
     def now(self):
         return self.clock().astimezone(timezone.utc).isoformat(timespec='seconds')

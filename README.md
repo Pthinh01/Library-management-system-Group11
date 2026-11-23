@@ -1,37 +1,61 @@
 # Library Management System — Group 11
 
-Bản hiện tại chạy bằng một tệp Source_code.py, dùng SQLite và giao diện web theo thiết kế Figma.
+A Python library application with an embedded web interface and SQLite. The application source is contained in `Source_code.py`. It uses a three-layer architecture: presentation, business logic and data access.
 
-## Chạy chương trình
+## Run
 
-    python Source_code.py
+Use Python 3.12 or later:
 
-Mở [http://127.0.0.1:8765](http://127.0.0.1:8765). Giữ Terminal đang chạy; nhấn Ctrl+C để dừng.
+```sh
+python -m pip install -r requirements.txt
+python Source_code.py
+```
 
-Nếu sử dụng chức năng sao lưu mã hóa, cài thêm:
+Open http://127.0.0.1:8765. Keep the terminal open. Press Ctrl+C to stop.
 
-    python -m pip install cryptography
+Demo accounts: `thinh.nguyen` (librarian), `phucthinh` (member), `admin` (administrator). The demo password is `LibraryDemo!2026`.
 
-Tài khoản minh họa: thinh.nguyen, phucthinh hoặc admin; mật khẩu LibraryDemo!2026.
+The application creates `library.sqlite3` beside the source file. Keep this file to retain records after restarting. SQLite requires no separate database server. Images, fonts and interface resources are embedded in the Python file.
 
-## Dữ liệu
+## Automated tests
 
-Chương trình tự tạo library.sqlite3 cạnh mã nguồn. Giữ tệp này để dùng lại dữ liệu sau khi tắt hoặc chuyển máy. Tệp dữ liệu đang sử dụng không được đưa lên kho mã nguồn. Giao diện, ảnh và font đã nhúng trong Source_code.py.
+```sh
+python run_tests.py
+```
+
+The Python `unittest` suite contains 128 tests: 122 functional, domain and HTTP tests, plus 6 class-diagram tests. Tests use temporary databases and do not modify `library.sqlite3`. The runner exits with an error if any test fails and writes its detailed results to `test-results.txt`.
+
+The Excel document contains 40 concise test cases in English, including manual interface and deployment checks. These are separate from the 128 automated tests. Performance, availability and usability targets require testing in the intended deployment environment.
+
+## Codespaces
+
+```sh
+python Source_code.py --host 0.0.0.0 --port 8765
+```
+
+Open port 8765 from the Ports panel. Change the port number if necessary.
 
 ## Docker
 
-    docker build -t library-group11 .
-    docker run -d --name library-group11 -p 127.0.0.1:8766:8765 library-group11
+```sh
+docker build -t library-group11 .
+docker run -d --name library-group11 -p 127.0.0.1:8766:8765 library-group11
+```
 
-Mở [http://127.0.0.1:8766](http://127.0.0.1:8766). Tạm dừng bằng docker stop library-group11, chạy lại bằng docker start library-group11. Khi chạy Docker, SQLite nằm trong container.
+Open http://127.0.0.1:8766.
 
-## Các tệp bài nộp
+```sh
+docker stop library-group11
+docker start library-group11
+```
 
-- Source_code.py: toàn bộ mã Python, cơ sở dữ liệu và giao diện.
-- Testing Document.xlsx: tài liệu kiểm thử rút gọn, 40 test case theo 5 cột mẫu.
-- Dockerfile: cấu hình đóng gói.
-- task assignment.docx: phân công công việc của nhóm.
-- containing evidence of tool usage.docx: tài liệu minh chứng công cụ.
+The SQLite file remains in the same container after stop/start. Removing the container also removes its database unless it has been backed up or stored on a persistent mount.
 
-Điểm khởi chạy của chương trình là Source_code.py.
+## Submission files
 
+- `Source_code.py`: application, domain classes, database creation and interface.
+- `Testing Document.xlsx`: 40 test cases in English using SQLite.
+- `Dockerfile` and `requirements.txt`: runtime setup.
+- `test_*.py`, `run_tests.py` and `test-results.txt`: automated tests and execution evidence.
+- `task assignment.docx`: team task assignment.
+- `containing evidence of tool usage.docx`: tool usage evidence.
